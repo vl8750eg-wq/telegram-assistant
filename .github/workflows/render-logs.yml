@@ -23,4 +23,16 @@ jobs:
           echo "=== логи сервиса ==="
           START=$(date -u -d '-2 hours' +%Y-%m-%dT%H:%M:%SZ)
           curl -s -H "Authorization: Bearer $RENDER_API_KEY" \
-            "https://api.render.com/v1/logs?owner=$OWNER_ID&name=$SVC&limit=100&startTime=$START" | head -c 4000; echo
+            "https://api.render.com/v1/logs?ownerId=$OWNER_ID&resource=$SVC&limit=100&startTime=$START&type=app&type=build" \
+            > logs_raw.json
+          python3 - <<'PY'
+          import json
+          data = json.load(open('logs_raw.json'))
+          if isinstance(data, dict) and 'logs' in data:
+              print('hasMore:', data.get('hasMore'))
+              for row in data['logs']:
+                  item = row.get('log', row)
+                  print(item.get('timestamp', ''), item.get('level', ''), item.get('message', '')[:250])
+          else:
+              print('RAW:', json.dumps(data, ensure_ascii=False)[:1500])
+          PY
