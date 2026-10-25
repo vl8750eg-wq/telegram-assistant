@@ -137,6 +137,23 @@ powershell -ExecutionPolicy Bypass -File .\autostart.ps1 -Remove  # выключ
 Заголовки колонок таблицы `messages`: `created_at, channel, sender, username, chat_id,
 message, reply, media_url`. Менять можно, но тогда поправьте `build_row` в `supabase_sink.py`.
 
+## Деплой на Render (free)
+
+Сервис: **https://telegram-assistant-v8pj.onrender.com** (Франкфурт, план free).
+Проверка живости: `/healthz` → `ok`.
+
+- Сборка и запуск — `render.yaml` (build: `pip install -r requirements.txt`, start: `python main.py`).
+- Сессия Telegram передаётся строкой `TG_SESSION_STRING`; файловая сессия используется только локально.
+- `api.render.com` из сети владельца заблокирован, поэтому управление (деплой, логи)
+  идёт через GitHub Actions: workflows `render-deploy`, `render-fix`, `render-logs`.
+  Ключ Render API и полный payload настроек лежат в зашифрованных секретах репозитория
+  (`RENDER_API_KEY`, `DEPLOY_PAYLOAD`).
+- **Не засыпать:** free-план засыпает через 15 минут без HTTP-запросов. Workflow `keepalive`
+  пингует `/healthz` каждые 5 минут по расписанию GitHub Actions.
+- **Важно:** сессия одна — нельзя запускать локальный `start.bat`, пока сервис жив на Render.
+- Обновление env-переменных через API: `PUT /v1/services/{id}/env-vars`, затем новый деплой
+  (создание сервиса с envVars в payload их не применяет — проверено).
+
 ## Структура
 
 | Файл | Назначение |
