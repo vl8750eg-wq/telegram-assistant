@@ -1,6 +1,7 @@
 telethon>=1.36
 openai>=1.40
 python-dotenv>=1.0
+httpx>=0.27
 
 # Внимание: pyaes ставится отдельно в setup.bat (сборка из sdist),
 # потому что на PyPI для него нет wheel.
