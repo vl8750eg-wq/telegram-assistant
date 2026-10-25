@@ -1,0 +1,132 @@
+name: render-fix
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Diagnose env vars and app logs
+        env:
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+          SVC: srv-dbf5hbnavr4c73ct2bq0
+        run: |
+          set -e
+          echo "=== текущие env-переменные (только ключи) ==="
+          curl -s -H "Authorization: Bearer $RENDER_API_KEY" \
+            "https://api.render.com/v1/services/$SVC/env-vars?limit=100" \
+            | python3 -c "
+          import json,sys
+          for row in json.load(sys.stdin):
+              v = row.get('envVar', row)
+              print('-', v.get('key'))
+          "
+          OWNER_ID=$(curl -s -H "Authorization: Bearer $RENDER_API_KEY" \
+            "https://api.render.com/v1/owners" \
+            | python3 -c "import json,sys;rows=json.load(sys.stdin);o=rows[0].get('owner',rows[0]);print(o.get('id',''))")
+          echo "=== логи приложения (последние 20 мин) ==="
+          START=$(date -u -d '-20 minutes' +%Y-%m-%dT%H:%M:%SZ)
+          curl -s -H "Authorization: Bearer $RENDER_API_KEY" \
+            "https://api.render.com/v1/logs?ownerId=$OWNER_ID&resource=$SVC&limit=100&startTime=$START&type=app" \
+            | python3 -c "
+          import json,sys
+          data = json.load(sys.stdin)
+          for row in data.get('logs', []):
+              item = row.get('log', row)
+              msg = item.get('message', '')
+              if msg:
+                  print(msg[:250])
+          " | tail -30
+
+      - name: Set env vars from payload
+        env:
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+          DEPLOY_PAYLOAD: ${{ secrets.DEPLOY_PAYLOAD }}
+          SVC: srv-dbf5hbnavr4c73ct2bq0
+        run: |
+          set -e
+          echo "$DEPLOY_PAYLOAD" | base64 -d > payload.json
+          python3 -c "
+          import json
+          p = json.load(open('payload.json'))
+          env_vars = p['serviceDetails']['envSpecificDetails']['envVars']
+          json.dump(env_vars, open('env_vars.json', 'w'))
+          print('переменных в payload:', len(env_vars))
+          "
+          HTTP=$(curl -s -o put_resp.json -w "%{http_code}" -X PUT \
+            "https://api.render.com/v1/services/$SVC/env-vars" \
+            -H "Authorization: Bearer $RENDER_API_KEY" -H "Content-Type: application/json" \
+            -d @env_vars.json)
+          echo "PUT env-vars: HTTP $HTTP"
+          test "$HTTP" = "200" || { cat put_resp.json | head -c 500; exit 1; }
+          python3 -c "import json;rows=json.load(open('put_resp.json'));print('записано ключей:', len(rows))"
+
+      - name: Trigger deploy and wait for live
+        env:
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+          SVC: srv-dbf5hbnavr4c73ct2bq0
+        run: |
+          set -e
+          BEFORE=$(curl -s -H "Authorization: Bearer $RENDER_API_KEY" \
+            "https://api.render.com/v1/services/$SVC/deploys?limit=1" \
+            | python3 -c "import json,sys;d=json.load(sys.stdin);row=d[0] if d else {};obj=row.get('deploy',row);print(obj.get('id',''))")
+          curl -s -X POST "https://api.render.com/v1/services/$SVC/deploys" \
+            -H "Authorization: Bearer $RENDER_API_KEY" -H "Content-Type: application/json" \
+            -d '{"clearCache": "no"}' > trigger.json || true
+          echo "deploy triggered: $(head -c 200 trigger.json)"
+          for i in $(seq 1 130); do
+            sleep 6
+            LATEST=$(curl -s -H "Authorization: Bearer $RENDER_API_KEY" \
+              "https://api.render.com/v1/services/$SVC/deploys?limit=1" \
+              | python3 -c "import json,sys;d=json.load(sys.stdin);row=d[0] if d else {};obj=row.get('deploy',row);print(obj.get('id',''))")
+            S=$(curl -s -H "Authorization: Bearer $RENDER_API_KEY" \
+              "https://api.render.com/v1/services/$SVC/deploys?limit=1" \
+              | python3 -c "import json,sys;d=json.load(sys.stdin);row=d[0] if d else {};obj=row.get('deploy',row);print(obj.get('status','none'))")
+            if [ "$LATEST" = "$BEFORE" ] && [ $i -gt 5 ]; then
+              echo "новый деплой ещё не появился…"
+            else
+              echo "deploy $LATEST: $S"
+            fi
+            case "$S" in
+              live) echo "DEPLOY LIVE"; exit 0 ;;
+              build_failed|update_failed|canceled|deactivated) exit 1 ;;
+            esac
+          done
+          echo "timeout"; exit 1
+
+      - name: Health check and final logs
+        env:
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+          SVC: srv-dbf5hbnavr4c73ct2bq0
+        run: |
+          set -e
+          URL=$(curl -s -H "Authorization: Bearer $RENDER_API_KEY" \
+            "https://api.render.com/v1/services/$SVC" \
+            | python3 -c "import json,sys
+          d=json.load(sys.stdin);obj=d.get('service',d);details=obj.get('serviceDetails') or {}
+          print(details.get('url',''))")
+          echo "Service URL: $URL"
+          for i in $(seq 1 12); do
+            CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 15 "$URL/healthz" || true)
+            echo "healthz: $CODE"
+            if [ "$CODE" = "200" ]; then break; fi
+            sleep 5
+          done
+          OWNER_ID=$(curl -s -H "Authorization: Bearer $RENDER_API_KEY" \
+            "https://api.render.com/v1/owners" \
+            | python3 -c "import json,sys;rows=json.load(sys.stdin);o=rows[0].get('owner',rows[0]);print(o.get('id',''))")
+          echo "=== логи приложения после деплоя ==="
+          START=$(date -u -d '-5 minutes' +%Y-%m-%dT%H:%M:%SZ)
+          curl -s -H "Authorization: Bearer $RENDER_API_KEY" \
+            "https://api.render.com/v1/logs?ownerId=$OWNER_ID&resource=$SVC&limit=50&startTime=$START&type=app" \
+            | python3 -c "
+          import json,sys
+          data = json.load(sys.stdin)
+          for row in data.get('logs', []):
+              item = row.get('log', row)
+              msg = item.get('message', '')
+              if msg:
+                  print(msg[:250])
+          "
+          test "$CODE" = "200"
