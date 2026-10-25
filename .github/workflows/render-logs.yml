@@ -21,10 +21,6 @@ jobs:
             "https://api.render.com/v1/services/$SVC/events?limit=6" > events_raw.json
           python3 -c "import json;print(json.dumps(json.load(open('events_raw.json')), indent=1)[:3000])"
           echo "=== логи сервиса ==="
-          START=$(( $(date +%s%3N) - 7200000 ))
-          echo "--- вариант 1 (name=id) ---"
+          START=$(date -u -d '-2 hours' +%Y-%m-%dT%H:%M:%SZ)
           curl -s -H "Authorization: Bearer $RENDER_API_KEY" \
-            "https://api.render.com/v1/logs?owner=$OWNER_ID&name=$SVC&limit=50&startTime=$START" | head -c 1500; echo
-          echo "--- вариант 2 (name=имя сервиса) ---"
-          curl -s -H "Authorization: Bearer $RENDER_API_KEY" \
-            "https://api.render.com/v1/logs?owner=$OWNER_ID&name=telegram-assistant&limit=50&startTime=$START" | head -c 3000; echo
+            "https://api.render.com/v1/logs?owner=$OWNER_ID&name=$SVC&limit=100&startTime=$START" | head -c 4000; echo
