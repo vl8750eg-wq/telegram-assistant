@@ -18,8 +18,7 @@ jobs:
 
           OWNER_RAW=$(curl -s -H "Authorization: Bearer $RENDER_API_KEY" \
             "https://api.render.com/v1/owners")
-          echo "$OWNER_RAW" | python3 -c "import json,sys;rows=json.load(sys.stdin);print('owners keys:', [sorted(r.keys()) for r in rows][:5])"
-          OWNER_ID=$(echo "$OWNER_RAW" | python3 -c "import json,sys;rows=json.load(sys.stdin);print(rows[0].get('id') or rows[0].get('_id') or '')")
+          OWNER_ID=$(echo "$OWNER_RAW" | python3 -c "import json,sys;rows=json.load(sys.stdin);o=rows[0].get('owner',rows[0]);print(o.get('id',''))")
           echo "owner: ${OWNER_ID:-not found}"
           test -n "$OWNER_ID" || { echo "owner not obtained"; exit 1; }
           python3 - "$OWNER_ID" <<'PY'
