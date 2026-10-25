@@ -16,18 +16,14 @@ jobs:
           OWNER_ID=$(curl -s -H "Authorization: Bearer $RENDER_API_KEY" \
             "https://api.render.com/v1/owners" \
             | python3 -c "import json,sys;rows=json.load(sys.stdin);o=rows[0].get('owner',rows[0]);print(o.get('id',''))")
-          echo "=== события сервиса ==="
+          echo "=== события сервиса (сырые) ==="
           curl -s -H "Authorization: Bearer $RENDER_API_KEY" \
-            "https://api.render.com/v1/services/$SVC/events?limit=12" \
-            | python3 -c "
-          import json,sys
-          for row in json.load(sys.stdin):
-              ev = row.get('event', row)
-              print('-', ev.get('type'), '|', str(ev.get('reason'))[:200], '|', ev.get('createdAt'))
-          "
+            "https://api.render.com/v1/services/$SVC/events?limit=6" > events_raw.json
+          python3 -c "import json;print(json.dumps(json.load(open('events_raw.json')), indent=1)[:3000])"
           echo "=== логи сервиса ==="
+          START=$(( $(date +%s%3N) - 7200000 ))
           curl -s -H "Authorization: Bearer $RENDER_API_KEY" \
-            "https://api.render.com/v1/logs?owner=$OWNER_ID&name=$SVC&limit=150" > logs_raw.json
+            "https://api.render.com/v1/logs?owner=$OWNER_ID&name=$SVC&limit=150&startTime=$START" > logs_raw.json
           python3 - <<'PY'
           import json
           try:
