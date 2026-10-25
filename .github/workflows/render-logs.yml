@@ -7,7 +7,7 @@ jobs:
   logs:
     runs-on: ubuntu-latest
     steps:
-      - name: Fetch Render logs
+      - name: Fetch Render events and logs
         env:
           RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
           SVC: srv-dbf5hbnavr4c73ct2bq0
@@ -16,14 +16,28 @@ jobs:
           OWNER_ID=$(curl -s -H "Authorization: Bearer $RENDER_API_KEY" \
             "https://api.render.com/v1/owners" \
             | python3 -c "import json,sys;rows=json.load(sys.stdin);o=rows[0].get('owner',rows[0]);print(o.get('id',''))")
-          echo "=== последний деплой ==="
+          echo "=== события сервиса ==="
           curl -s -H "Authorization: Bearer $RENDER_API_KEY" \
-            "https://api.render.com/v1/services/$SVC/deploys?limit=2" \
-            | python3 -m json.tool | head -80
-          echo "=== логи (стрим, 25 с) ==="
-          curl -sN --max-time 25 -H "Authorization: Bearer $RENDER_API_KEY" \
-            "https://api.render.com/v1/logs/stream?owner=$OWNER_ID&name=$SVC&limit=200" > logs.jsonl || true
-          echo "получено строк: $(wc -l < logs.jsonl)"
-          grep -aiE "error|traceback|exit|fatal|exception|порт|Аккаунт|Health|assistant|main.py" logs.jsonl | tail -60 || true
-          echo "=== последние 20 строк целиком ==="
-          tail -20 logs.jsonl
+            "https://api.render.com/v1/services/$SVC/events?limit=12" \
+            | python3 -c "
+          import json,sys
+          for row in json.load(sys.stdin):
+              ev = row.get('event', row)
+              print('-', ev.get('type'), '|', str(ev.get('reason'))[:200], '|', ev.get('createdAt'))
+          "
+          echo "=== логи сервиса ==="
+          curl -s -H "Authorization: Bearer $RENDER_API_KEY" \
+            "https://api.render.com/v1/logs?owner=$OWNER_ID&name=$SVC&limit=150" > logs_raw.json
+          python3 - <<'PY'
+          import json
+          try:
+              data = json.load(open('logs_raw.json'))
+          except Exception as exc:
+              print('не JSON:', open('logs_raw.json').read()[:300]); raise SystemExit
+          rows = data.get('logs', data) if isinstance(data, dict) else data
+          for row in rows or []:
+              item = row.get('log', row) if isinstance(row, dict) else {}
+              msg = item.get('message', '')
+              if msg:
+                  print(item.get('timestamp', ''), msg[:300])
+          PY
