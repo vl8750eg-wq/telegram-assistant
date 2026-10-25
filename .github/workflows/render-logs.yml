@@ -16,6 +16,23 @@ jobs:
           OWNER_ID=$(curl -s -H "Authorization: Bearer $RENDER_API_KEY" \
             "https://api.render.com/v1/owners" \
             | python3 -c "import json,sys;rows=json.load(sys.stdin);o=rows[0].get('owner',rows[0]);print(o.get('id',''))")
+          echo "=== статусы деплоев ==="
+          curl -s -H "Authorization: Bearer $RENDER_API_KEY" \
+            "https://api.render.com/v1/services/$SVC/deploys?limit=5" \
+            | python3 -c "
+          import json,sys
+          for row in json.load(sys.stdin):
+              d = row.get('deploy', row)
+              print('-', d.get('id'), d.get('status'), d.get('createdAt'), '->', d.get('finishedAt'))
+          "
+          echo "=== healthz ==="
+          URL=$(curl -s -H "Authorization: Bearer $RENDER_API_KEY" \
+            "https://api.render.com/v1/services/$SVC" \
+            | python3 -c "import json,sys
+          d=json.load(sys.stdin);obj=d.get('service',d);details=obj.get('serviceDetails') or {}
+          print(details.get('url',''))")
+          echo "URL: $URL"
+          curl -s -o /dev/null -w "healthz: %{http_code}\n" --max-time 20 "$URL/healthz" || true
           echo "=== события сервиса (сырые) ==="
           curl -s -H "Authorization: Bearer $RENDER_API_KEY" \
             "https://api.render.com/v1/services/$SVC/events?limit=6" > events_raw.json
