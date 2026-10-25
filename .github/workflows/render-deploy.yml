@@ -1,0 +1,82 @@
+name: render-deploy
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create or find Render service
+        env:
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+          DEPLOY_PAYLOAD: ${{ secrets.DEPLOY_PAYLOAD }}
+        run: |
+          set -e
+          echo "$DEPLOY_PAYLOAD" | base64 -d > payload.json
+          NAME=$(python3 -c "import json;print(json.load(open('payload.json'))['name'])")
+
+          ID=$(curl -s -H "Authorization: Bearer $RENDER_API_KEY" \
+            "https://api.render.com/v1/services?name=$NAME" \
+            | python3 -c "import json,sys;rows=json.load(sys.stdin);print(rows[0]['id'] if rows else '')" || true)
+          echo "existing service: ${ID:-none}"
+
+          if [ -z "$ID" ]; then
+            for REGION in frankfurt oregon none; do
+              python3 - "$REGION" <<'PY'
+          import json, sys
+          region = sys.argv[1]
+          p = json.load(open('payload.json'))
+          if region == 'none':
+              p.pop('region', None)
+          else:
+              p['region'] = region
+          json.dump(p, open('payload.json', 'w'))
+          PY
+              HTTP=$(curl -s -o create_resp.json -w "%{http_code}" -X POST https://api.render.com/v1/services \
+                -H "Authorization: Bearer $RENDER_API_KEY" -H "Content-Type: application/json" \
+                -d @payload.json)
+              echo "create ($REGION): HTTP $HTTP"
+              if [ "$HTTP" = "200" ] || [ "$HTTP" = "201" ]; then
+                ID=$(python3 -c "import json;print(json.load(open('create_resp.json'))['id'])")
+                break
+              fi
+              python3 -c "import json;print(json.load(open('create_resp.json')).get('message','')[:300])" || true
+            done
+          fi
+          test -n "$ID" || { echo "service id not obtained"; exit 1; }
+          echo "service id: $ID"
+          echo "ID=$ID" >> "$GITHUB_ENV"
+
+      - name: Wait for deploy to go live
+        env:
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+        run: |
+          for i in $(seq 1 100); do
+            sleep 6
+            S=$(curl -s -H "Authorization: Bearer $RENDER_API_KEY" \
+              "https://api.render.com/v1/services/$ID/deploys?limit=1" \
+              | python3 -c "import json,sys;d=json.load(sys.stdin);print(d[0]['status'] if d else 'none')" || echo err)
+            echo "deploy status: $S"
+            case "$S" in
+              live) echo "DEPLOY LIVE"; exit 0 ;;
+              build_failed|update_failed|canceled|deactivated) exit 1 ;;
+            esac
+          done
+          echo "timeout waiting for live"; exit 1
+
+      - name: Health check
+        env:
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+        run: |
+          URL=$(curl -s -H "Authorization: Bearer $RENDER_API_KEY" \
+            "https://api.render.com/v1/services/$ID" \
+            | python3 -c "import json,sys;d=json.load(sys.stdin);print((d.get('serviceDetails') or {}).get('url',''))")
+          echo "Service URL: $URL"
+          for i in $(seq 1 12); do
+            CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 15 "$URL/healthz" || true)
+            echo "healthz: $CODE"
+            if [ "$CODE" = "200" ]; then echo "HEALTH_OK $URL"; exit 0; fi
+            sleep 5
+          done
+          exit 1
