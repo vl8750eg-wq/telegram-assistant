@@ -1,0 +1,29 @@
+name: render-logs
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  logs:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fetch Render logs
+        env:
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+          SVC: srv-dbf5hbnavr4c73ct2bq0
+        run: |
+          set -e
+          OWNER_ID=$(curl -s -H "Authorization: Bearer $RENDER_API_KEY" \
+            "https://api.render.com/v1/owners" \
+            | python3 -c "import json,sys;rows=json.load(sys.stdin);o=rows[0].get('owner',rows[0]);print(o.get('id',''))")
+          echo "=== последний деплой ==="
+          curl -s -H "Authorization: Bearer $RENDER_API_KEY" \
+            "https://api.render.com/v1/services/$SVC/deploys?limit=2" \
+            | python3 -m json.tool | head -80
+          echo "=== логи (стрим, 25 с) ==="
+          curl -sN --max-time 25 -H "Authorization: Bearer $RENDER_API_KEY" \
+            "https://api.render.com/v1/logs/stream?owner=$OWNER_ID&name=$SVC&limit=200" > logs.jsonl || true
+          echo "получено строк: $(wc -l < logs.jsonl)"
+          grep -aiE "error|traceback|exit|fatal|exception|порт|Аккаунт|Health|assistant|main.py" logs.jsonl | tail -60 || true
+          echo "=== последние 20 строк целиком ==="
+          tail -20 logs.jsonl
