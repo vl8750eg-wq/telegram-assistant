@@ -16,6 +16,18 @@ jobs:
           echo "$DEPLOY_PAYLOAD" | base64 -d > payload.json
           NAME=$(python3 -c "import json;print(json.load(open('payload.json'))['name'])")
 
+          OWNER_ID=$(curl -s -H "Authorization: Bearer $RENDER_API_KEY" \
+            "https://api.render.com/v1/owners" \
+            | python3 -c "import json,sys;rows=json.load(sys.stdin);print(rows[0]['id'] if rows else '')")
+          echo "owner: ${OWNER_ID:-not found}"
+          test -n "$OWNER_ID" || { echo "owner not obtained"; exit 1; }
+          python3 - "$OWNER_ID" <<'PY'
+          import json, sys
+          p = json.load(open('payload.json'))
+          p['ownerId'] = sys.argv[1]
+          json.dump(p, open('payload.json', 'w'))
+          PY
+
           ID=$(curl -s -H "Authorization: Bearer $RENDER_API_KEY" \
             "https://api.render.com/v1/services?name=$NAME" \
             | python3 -c "import json,sys;rows=json.load(sys.stdin);print(rows[0]['id'] if rows else '')" || true)
