@@ -1,0 +1,40 @@
+# Манифест Render (blueprint). Секретные переменные (sync: false)
+# задаются в панели Render или через API, а не в репозитории.
+services:
+  - type: web
+    name: telegram-assistant
+    runtime: python
+    plan: free
+    branch: main
+    buildCommand: pip install -r requirements.txt
+    startCommand: python main.py
+    healthCheckPath: /healthz
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.6
+      - key: TG_API_ID
+        sync: false
+      - key: TG_API_HASH
+        sync: false
+      - key: TG_SESSION_STRING
+        sync: false
+      - key: LLM_API_KEY
+        sync: false
+      - key: LLM_BASE_URL
+        sync: false
+      - key: LLM_MODEL
+        sync: false
+      - key: OWNER_NAME
+        sync: false
+      - key: SYSTEM_PROMPT
+        sync: false
+      - key: DISCLOSE_AI
+        value: "false"
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_KEY
+        sync: false
+      - key: SUPABASE_TABLE
+        sync: false
+      - key: SUPABASE_BUCKET
+        sync: false
