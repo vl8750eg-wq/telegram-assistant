@@ -39,10 +39,11 @@ jobs:
           import json, sys
           region = sys.argv[1]
           p = json.load(open('payload.json'))
+          details = p.setdefault('serviceDetails', {})
           if region == 'none':
-              p.pop('region', None)
+              details.pop('region', None)
           else:
-              p['region'] = region
+              details['region'] = region
           json.dump(p, open('payload.json', 'w'))
           PY
               HTTP=$(curl -s -o create_resp.json -w "%{http_code}" -X POST https://api.render.com/v1/services \
