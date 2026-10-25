@@ -30,7 +30,11 @@ jobs:
 
           ID=$(curl -s -H "Authorization: Bearer $RENDER_API_KEY" \
             "https://api.render.com/v1/services?name=$NAME" \
-            | python3 -c "import json,sys;rows=json.load(sys.stdin);print(rows[0]['id'] if rows else '')" || true)
+            | python3 -c "import json,sys
+          rows = json.load(sys.stdin)
+          row = rows[0] if rows else {}
+          obj = row.get('service', row)
+          print(obj.get('id',''))" || true)
           echo "existing service: ${ID:-none}"
 
           if [ -z "$ID" ]; then
@@ -51,7 +55,10 @@ jobs:
                 -d @payload.json)
               echo "create ($REGION): HTTP $HTTP"
               if [ "$HTTP" = "200" ] || [ "$HTTP" = "201" ]; then
-                ID=$(python3 -c "import json;print(json.load(open('create_resp.json'))['id'])")
+                ID=$(python3 -c "import json
+          obj = json.load(open('create_resp.json'))
+          obj = obj.get('service', obj)
+          print(obj.get('id',''))")
                 break
               fi
               python3 -c "import json;print(json.load(open('create_resp.json')).get('message','')[:300])" || true
@@ -69,7 +76,11 @@ jobs:
             sleep 6
             S=$(curl -s -H "Authorization: Bearer $RENDER_API_KEY" \
               "https://api.render.com/v1/services/$ID/deploys?limit=1" \
-              | python3 -c "import json,sys;d=json.load(sys.stdin);print(d[0]['status'] if d else 'none')" || echo err)
+              | python3 -c "import json,sys
+          d = json.load(sys.stdin)
+          row = d[0] if d else {}
+          obj = row.get('deploy', row)
+          print(obj.get('status','none') if obj else 'none')" || echo err)
             echo "deploy status: $S"
             case "$S" in
               live) echo "DEPLOY LIVE"; exit 0 ;;
@@ -84,7 +95,11 @@ jobs:
         run: |
           URL=$(curl -s -H "Authorization: Bearer $RENDER_API_KEY" \
             "https://api.render.com/v1/services/$ID" \
-            | python3 -c "import json,sys;d=json.load(sys.stdin);print((d.get('serviceDetails') or {}).get('url',''))")
+            | python3 -c "import json,sys
+          d = json.load(sys.stdin)
+          obj = d.get('service', d)
+          details = obj.get('serviceDetails') or {}
+          print(details.get('url',''))")
           echo "Service URL: $URL"
           for i in $(seq 1 12); do
             CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 15 "$URL/healthz" || true)
