@@ -40,6 +40,8 @@ class SupabaseSink:
         self.journal_enabled = journal
         self.journal_table = (journal_table or "journal").strip()
         self._write_lock = threading.Lock()
+        # Какие необязательные колонки реально есть в таблице (после миграции).
+        self._has: Dict[str, bool] = {}
         # trust_env=False: переменные HTTPS_PROXY/NO_PROXY окружения не должны ломать запросы
         self._client = httpx.Client(timeout=HTTP_TIMEOUT, trust_env=False)
 
@@ -79,6 +81,7 @@ class SupabaseSink:
             )
             if response.status_code in (200, 206):
                 log.info("Таблица Supabase %s доступна", self.table)
+                self._detect_columns()
                 return True
             log.error("Таблица Supabase %s недоступна (HTTP %s). Создайте её по SQL из bootstrap.sql: %s",
                       self.table, response.status_code, response.text[:200])
@@ -86,6 +89,26 @@ class SupabaseSink:
         except Exception as exc:  # noqa: BLE001
             log.error("Supabase недоступен (%s): %s", self.url, exc)
             return False
+
+    def _detect_columns(self) -> None:
+        """Проверяет наличие необязательных колонок (миграция из bootstrap.sql)."""
+        for column in ("chat_title", "chat_username", "sender_id", "direction"):
+            try:
+                response = self._client.get(
+                    f"{self.url}/rest/v1/{self.table}?select={column}&limit=0",
+                    headers=self._headers(with_prefer=False),
+                )
+                self._has[column] = response.status_code in (200, 206)
+            except Exception as exc:  # noqa: BLE001
+                self._has[column] = False
+                log.debug("Не удалось проверить колонку %s: %s", column, exc)
+        missing = [name for name, present in self._has.items() if not present]
+        if missing:
+            log.warning(
+                "В таблице %s нет колонок %s — данные чата сохранятся в channel. "
+                "Выполните миграцию из bootstrap.sql.",
+                self.table, ", ".join(missing),
+            )
 
     def append(self, values: Dict) -> bool:
         """Вставляет одну строку (dict) в таблицу. Результат пишется в журнал."""
@@ -188,12 +211,27 @@ class SupabaseSink:
 
     def build_row(self, channel: str, sender: str, text: str, reply: str = "",
                   username: str = "", chat_id: int | str = "",
-                  media_url: str = "", media_type: str = "") -> Dict:
-        """Строка-словарь для вставки: ключи = колонки таблицы."""
+                  media_url: str = "", media_type: str = "",
+                  chat_title: str = "", chat_username: str = "",
+                  sender_id: int | str | None = None, direction: str = "") -> Dict:
+        """Строка-словарь для вставки: ключи = колонки таблицы.
+
+        Необязательные поля (chat_title/chat_username/sender_id/direction)
+        добавляются только если колонки есть в таблице. Иначе важные данные
+        не теряются: название и username чата дописываются в channel.
+        """
         stamp = time.strftime("%Y-%m-%dT%H:%M:%S")
-        return {
+        label = channel
+        if chat_title and not self._has.get("chat_title"):
+            label = f"{label} · {chat_title}"
+        if chat_username and not self._has.get("chat_username"):
+            label = f"{label} (@{chat_username})"
+        if direction == "out" and not self._has.get("direction"):
+            label = f"{label} · исходящее"
+
+        row: Dict = {
             "created_at": stamp,
-            "channel": channel,
+            "channel": label,
             "sender": sender,
             "username": f"@{username}" if username else "",
             "chat_id": str(chat_id),
@@ -202,11 +240,26 @@ class SupabaseSink:
             "media_url": media_url,
             "media_type": media_type,
         }
+        if self._has.get("chat_title"):
+            row["chat_title"] = chat_title
+        if self._has.get("chat_username"):
+            row["chat_username"] = chat_username
+        if self._has.get("sender_id"):
+            row["sender_id"] = str(sender_id or "")
+        if self._has.get("direction"):
+            row["direction"] = direction
+        return row
 
     def append_message(self, channel: str, sender: str, text: str, reply: str = "",
                        username: str = "", chat_id: int | str = "",
-                       media_url: str = "", media_type: str = "") -> bool:
-        return self.append(self.build_row(channel, sender, text, reply, username, chat_id, media_url, media_type))
+                       media_url: str = "", media_type: str = "",
+                       chat_title: str = "", chat_username: str = "",
+                       sender_id: int | str | None = None, direction: str = "") -> bool:
+        return self.append(self.build_row(
+            channel, sender, text, reply, username, chat_id, media_url, media_type,
+            chat_title=chat_title, chat_username=chat_username,
+            sender_id=sender_id, direction=direction,
+        ))
 
     def close(self) -> None:
         self._client.close()

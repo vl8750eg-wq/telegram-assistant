@@ -16,11 +16,19 @@ create table if not exists public.messages (
   message     text not null default '',
   reply       text not null default '',
   media_url   text not null default '',
-  media_type  text not null default ''
+  media_type  text not null default '',
+  chat_title  text not null default '',
+  chat_username text not null default '',
+  sender_id   text not null default '',
+  direction   text not null default ''
 );
 
--- Если таблица уже существовала без колонки media_type — добавляем её.
+-- Миграции для уже существующей таблицы: выполняются безопасно повторно.
 alter table public.messages add column if not exists media_type text not null default '';
+alter table public.messages add column if not exists chat_title text not null default '';
+alter table public.messages add column if not exists chat_username text not null default '';
+alter table public.messages add column if not exists sender_id text not null default '';
+alter table public.messages add column if not exists direction text not null default '';
 
 -- ---------------------------------------------------------------------------
 -- 2. Таблица журнала (аудит операций)

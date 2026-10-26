@@ -315,7 +315,10 @@ class SheetsSink:
         return False
 
     def build_row(self, channel: str, sender: str, text: str, reply: str = "",
-                  username: str = "", chat_id: int | str = "") -> List:
+                  username: str = "", chat_id: int | str = "",
+                  chat_title: str = "", chat_username: str = "",
+                  sender_id: int | str | None = None, direction: str = "",
+                  media_url: str = "", media_type: str = "") -> List:
         """Строка в порядке колонок таблицы (или базовый набор по умолчанию)."""
         stamp = time.strftime("%d.%m.%Y %H:%M:%S")
         if self.columns:
@@ -327,13 +330,29 @@ class SheetsSink:
                 "id": chat_id, "chat_id": chat_id, "chatid": chat_id,
                 "сообщение": text, "message": text, "текст": text, "text": text,
                 "ответ": reply, "reply": reply, "ai": reply,
+                "чат": chat_title, "chat": chat_title, "chat_title": chat_title,
+                "название": chat_title, "title": chat_title,
+                "chat_username": chat_username, "юзернейм чата": chat_username,
+                "sender_id": sender_id, "id отправителя": sender_id,
+                "направление": direction, "direction": direction,
+                "медиа": media_url, "media": media_url, "media_url": media_url,
+                "тип медиа": media_type, "media_type": media_type,
             }
             return [mapping.get(str(col).strip().lower(), "") for col in self.columns]
-        return [channel, stamp, f"{sender} {('@' + username) if username else ''}".strip(), text, reply]
+        label = f"{channel} · {chat_title}" if chat_title else channel
+        return [label, stamp, f"{sender} {('@' + username) if username else ''}".strip(), text, reply]
 
     def append_message(self, channel: str, sender: str, text: str, reply: str = "",
-                       username: str = "", chat_id: int | str = "") -> bool:
-        return self.append(self.build_row(channel, sender, text, reply, username, chat_id))
+                       username: str = "", chat_id: int | str = "",
+                       chat_title: str = "", chat_username: str = "",
+                       sender_id: int | str | None = None, direction: str = "",
+                       media_url: str = "", media_type: str = "") -> bool:
+        return self.append(self.build_row(
+            channel, sender, text, reply, username, chat_id,
+            chat_title=chat_title, chat_username=chat_username,
+            sender_id=sender_id, direction=direction,
+            media_url=media_url, media_type=media_type,
+        ))
 
     def close(self) -> None:
         self._client.close()

@@ -32,6 +32,25 @@ CREATE TABLE IF NOT EXISTS kv (
     key   TEXT PRIMARY KEY,
     value TEXT
 );
+
+-- Отдельный журнал групп и каналов: не попадает в историю личек,
+-- которую читает LLM, но сохраняет все поля сообщения.
+CREATE TABLE IF NOT EXISTS chat_log (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts              REAL    NOT NULL,
+    chat_id         INTEGER NOT NULL,
+    chat_type       TEXT    NOT NULL,          -- Группа | Канал
+    chat_title      TEXT    NOT NULL DEFAULT '',
+    chat_username   TEXT    NOT NULL DEFAULT '',
+    sender_id       INTEGER,
+    sender_name     TEXT    NOT NULL DEFAULT '',
+    sender_username TEXT    NOT NULL DEFAULT '',
+    direction       TEXT    NOT NULL DEFAULT 'in',  -- in | out
+    text            TEXT    NOT NULL DEFAULT '',
+    media_url       TEXT    NOT NULL DEFAULT '',
+    media_type      TEXT    NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_chat_log_chat ON chat_log(chat_id, id);
 """
 
 
@@ -56,6 +75,27 @@ class Store:
             self._db.execute(
                 "INSERT INTO messages(peer_id, role, text, ts) VALUES (?,?,?,?)",
                 (peer_id, role, text, time.time()),
+            )
+            self._db.commit()
+
+    def log_chat(self, chat_id: int, chat_type: str, chat_title: str = "",
+                 chat_username: str = "", sender_id: Optional[int] = None,
+                 sender_name: str = "", sender_username: str = "",
+                 direction: str = "in", text: str = "",
+                 media_url: str = "", media_type: str = "") -> None:
+        """Пишет сообщение группы/канала в отдельный журнал chat_log."""
+        with self._lock:
+            self._db.execute(
+                """INSERT INTO chat_log(
+                       ts, chat_id, chat_type, chat_title, chat_username,
+                       sender_id, sender_name, sender_username, direction,
+                       text, media_url, media_type)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    time.time(), chat_id, chat_type, chat_title, chat_username,
+                    sender_id, sender_name, sender_username, direction,
+                    text, media_url, media_type,
+                ),
             )
             self._db.commit()
 
@@ -166,5 +206,13 @@ class Store:
         with self._lock:
             peers = self._db.execute("SELECT COUNT(*) AS c FROM peers").fetchone()["c"]
             msgs = self._db.execute("SELECT COUNT(*) AS c FROM messages").fetchone()["c"]
+            chats = self._db.execute("SELECT COUNT(DISTINCT chat_id) AS c FROM chat_log").fetchone()["c"]
+            chat_msgs = self._db.execute("SELECT COUNT(*) AS c FROM chat_log").fetchone()["c"]
             last = self._db.execute("SELECT ts FROM messages WHERE role='assistant' ORDER BY id DESC LIMIT 1").fetchone()
-        return {"peers": int(peers), "messages": int(msgs), "last_reply": last["ts"] if last else None}
+        return {
+            "peers": int(peers),
+            "messages": int(msgs),
+            "chats": int(chats),
+            "chat_messages": int(chat_msgs),
+            "last_reply": last["ts"] if last else None,
+        }

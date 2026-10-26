@@ -177,6 +177,9 @@ async def extract(event) -> Optional[Attachment]:
     if message.geo:
         geo = message.geo
         return Attachment(kind="other", description=f"пользователь отправил геолокацию {geo.lat}, {geo.long}")
+    if message.poll:
+        question = (getattr(message.poll, "question", "") or "").strip()
+        return Attachment(kind="other", description=f"пользователь прислал опрос: {question}".strip())
     return None
 
 

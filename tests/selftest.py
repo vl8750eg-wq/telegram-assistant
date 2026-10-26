@@ -97,6 +97,51 @@ def test_filters() -> None:
         st.close()
 
 
+def test_chat_log() -> None:
+    from types import SimpleNamespace
+
+    from config import Config
+    from handlers import Assistant
+    from store import Store
+    from supabase_sink import SupabaseSink
+
+    print("группы и каналы:")
+    with tempfile.TemporaryDirectory() as tmp:
+        st = Store(Path(tmp) / "chat.db")
+        st.log_chat(
+            chat_id=-1001, chat_type="Группа", chat_title="Тестовая группа",
+            chat_username="testgroup", sender_id=42, sender_name="Вася",
+            sender_username="vasya", direction="in", text="привет",
+        )
+        stats = st.stats()
+        check("сообщение группы записано", stats["chat_messages"] == 1, str(stats))
+        check("чат учтён", stats["chats"] == 1, str(stats))
+        check("история личек не загрязнена", st.history(-1001) == [])
+
+        cfg = Config(
+            api_id=1, api_hash="a" * 32, phone="", llm_api_key="k",
+            llm_base_url="x", llm_model="m", owner_name="T", system_prompt="s",
+        )
+        a = Assistant(None, cfg, st, None)  # type: ignore[arg-type]
+        group = SimpleNamespace(is_group=True, is_channel=True, is_private=False)
+        channel = SimpleNamespace(is_group=False, is_channel=True, is_private=False)
+        check("супергруппа — Группа", a._chat_type(group) == "Группа")
+        check("канал — Канал", a._chat_type(channel) == "Канал")
+        check("группы логируются", a._chat_logging_enabled(group))
+        cfg.log_groups = False
+        check("группы можно выключить", not a._chat_logging_enabled(group))
+        st.close()
+
+    sink = SupabaseSink("https://example.supabase.co", "k")
+    row = sink.build_row(
+        "Группа", "Вася", "привет", chat_id=-1001,
+        chat_title="Тестовая группа", chat_username="testgroup", direction="in",
+    )
+    check("без миграции название чата не теряется", "Тестовая группа" in row["channel"], row["channel"])
+    check("без миграции username чата не теряется", "testgroup" in row["channel"], row["channel"])
+    sink.close()
+
+
 def test_config() -> None:
     import importlib
 
@@ -118,7 +163,7 @@ def test_config() -> None:
 
 
 def main() -> int:
-    for fn in (test_clean_text, test_split, test_store, test_filters, test_config):
+    for fn in (test_clean_text, test_split, test_store, test_filters, test_chat_log, test_config):
         fn()
     print()
     if failures:

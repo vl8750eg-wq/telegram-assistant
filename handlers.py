@@ -56,6 +56,8 @@ class Assistant:
         self._sent_ids: Deque[int] = deque(maxlen=500)
         self._recent_sends: Deque[tuple] = deque(maxlen=200)
         self._tasks: set[asyncio.Task] = set()
+        # не качать медиа из активных пабликов десятками одновременно
+        self._media_semaphore = asyncio.Semaphore(3)
 
     # ------------------------------------------------------------------ setup
 
@@ -76,10 +78,18 @@ class Assistant:
     # -------------------------------------------------------------- таблица
 
     def _sheet_log(self, channel: str, sender: str, text: str, reply: str = "",
-                   username: str = "", chat_id: int | str = "") -> None:
+                   username: str = "", chat_id: int | str = "",
+                   chat_title: str = "", chat_username: str = "",
+                   sender_id: int | str | None = None, direction: str = "",
+                   media_url: str = "", media_type: str = "") -> None:
         if not self.sink or not self.sink.enabled:
             return
-        values = self.sink.build_row(channel, sender, text, reply, username, chat_id)
+        values = self.sink.build_row(
+            channel, sender, text, reply, username, chat_id,
+            chat_title=chat_title, chat_username=chat_username,
+            sender_id=sender_id, direction=direction,
+            media_url=media_url, media_type=media_type,
+        )
         log.debug("Строка для таблицы: %s", values)
         asyncio.create_task(self._sheet_append(values))
 
@@ -95,20 +105,30 @@ class Assistant:
 
     def _db_log(self, channel: str, sender: str, text: str, reply: str = "",
                 username: str = "", chat_id: int | str = "", media_url: str = "",
-                media_type: str = "") -> None:
+                media_type: str = "", chat_title: str = "", chat_username: str = "",
+                sender_id: int | str | None = None, direction: str = "") -> None:
         """Реально-временная запись сообщения в Supabase (неблокирующе)."""
         if not self.db_sink or not self.db_sink.enabled:
             return
         asyncio.create_task(
-            self._db_append(channel, sender, text, reply, username, chat_id, media_url, media_type)
+            self._db_append(
+                channel, sender, text, reply, username, chat_id, media_url, media_type,
+                chat_title=chat_title, chat_username=chat_username,
+                sender_id=sender_id, direction=direction,
+            )
         )
 
     async def _db_append(self, channel: str, sender: str, text: str, reply: str,
                          username: str, chat_id: int | str, media_url: str,
-                         media_type: str) -> None:
+                         media_type: str, chat_title: str = "",
+                         chat_username: str = "", sender_id: int | str | None = None,
+                         direction: str = "") -> None:
         try:
             ok = await asyncio.to_thread(
-                self.db_sink.append_message, channel, sender, text, reply, username, chat_id, media_url, media_type
+                self.db_sink.append_message,
+                channel, sender, text, reply, username, chat_id, media_url, media_type,
+                chat_title=chat_title, chat_username=chat_username,
+                sender_id=sender_id, direction=direction,
             )
             if not ok:
                 log.warning("Сообщение не записано в Supabase")
@@ -136,27 +156,33 @@ class Assistant:
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
 
+    async def _upload_attachment(self, attachment: "attachments.Attachment") -> str:
+        """Загружает вложение в Supabase Storage, возвращает публичный URL."""
+        if not self.db_sink or not self.db_sink.enabled:
+            return ""
+        if attachment.image:
+            mime = attachment.image_mime or "image/jpeg"
+            ext = self._MIME_EXT.get(mime, ".bin")
+            payload, file_mime = attachment.image, mime
+            timeout = 60
+        elif attachment.file:
+            mime = attachment.file_mime or "application/octet-stream"
+            ext = attachment.file_ext or self._MIME_EXT.get(mime, ".bin")
+            payload, file_mime = attachment.file, mime
+            timeout = 120
+        else:
+            return ""
+        filename = f"tg_{int(time.time())}_{uuid.uuid4().hex[:8]}{ext}"
+        return await asyncio.wait_for(
+            asyncio.to_thread(self.db_sink.upload_media, payload, filename, file_mime, "media_upload"),
+            timeout=timeout,
+        )
+
     async def _db_media_task(self, attachment: "attachments.Attachment", caption: str,
                              sender: str, chat_id: int | str) -> None:
         try:
             media_type = attachment.kind or "media"
-            if attachment.image:
-                mime = attachment.image_mime or "image/jpeg"
-                ext = self._MIME_EXT.get(mime, ".bin")
-                payload, file_mime = attachment.image, mime
-                timeout = 60
-            elif attachment.file:
-                mime = attachment.file_mime or "application/octet-stream"
-                ext = attachment.file_ext or self._MIME_EXT.get(mime, ".bin")
-                payload, file_mime = attachment.file, mime
-                timeout = 120
-            else:
-                return
-            filename = f"tg_{int(time.time())}_{uuid.uuid4().hex[:8]}{ext}"
-            url = await asyncio.wait_for(
-                asyncio.to_thread(self.db_sink.upload_media, payload, filename, file_mime, "media_upload"),
-                timeout=timeout,
-            )
+            url = await self._upload_attachment(attachment)
             if url:
                 await self._db_append("Медиа", sender, caption, "[медиа сохранено]", "", chat_id, url, media_type)
                 log.info("Медиа %s сохранено в Supabase: %s", media_type, url)
@@ -190,6 +216,32 @@ class Assistant:
     def _paused(self, peer_id: int) -> bool:
         return self.store.get("global_pause") == "1" or self.store.is_paused(peer_id)
 
+    # ------------------------------------------------ группы и каналы (лог)
+
+    @staticmethod
+    def _chat_type(event) -> str:
+        """Тип чата: Группа (включая супергруппы), Канал или Чат."""
+        if getattr(event, "is_group", False):
+            return "Группа"
+        if getattr(event, "is_channel", False):
+            return "Канал"
+        return "Чат"
+
+    def _chat_logging_enabled(self, event) -> bool:
+        if getattr(event, "is_group", False):
+            return self.cfg.log_groups
+        if getattr(event, "is_channel", False):
+            return self.cfg.log_channels
+        return False
+
+    def _log_chat_event(self, event, outgoing: bool) -> None:
+        """Ставит в фон запись сообщения группы/канала во все хранилища."""
+        if not self._chat_logging_enabled(event):
+            return
+        task = asyncio.create_task(self._log_chat_event_task(event, outgoing))
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+
     # -------------------------------------------------------------- incoming
 
     async def _on_incoming(self, event: events.NewMessage.Event) -> None:
@@ -207,6 +259,8 @@ class Assistant:
 
     async def _process_incoming_inner(self, event: events.NewMessage.Event) -> None:
         if not event.is_private:
+            # Группы и каналы: сохраняем сообщение, но не отвечаем в них.
+            self._log_chat_event(event, outgoing=False)
             return
         peer_id = event.chat_id
         text = (event.raw_text or "").strip()
@@ -283,6 +337,110 @@ class Assistant:
         self._schedule(peer_id, self.cfg.debounce_seconds,
                        lambda: self._respond(peer_id))
 
+    async def _log_chat_event_task(self, event: events.NewMessage.Event, outgoing: bool) -> None:
+        """Сохраняет сообщение группы/канала со всеми доступными полями."""
+        try:
+            chat_id = event.chat_id
+            if chat_id is None:
+                return
+            chat_type = self._chat_type(event)
+            try:
+                chat = await event.get_chat()
+            except Exception as exc:  # noqa: BLE001 — без чата всё равно сохраняем текст
+                log.debug("Не удалось получить чат %s: %s", chat_id, exc)
+                chat = None
+            chat_title = (getattr(chat, "title", "") or getattr(chat, "first_name", "") or "").strip()
+            chat_username = (getattr(chat, "username", "") or "").strip()
+
+            try:
+                sender = await event.get_sender()
+            except Exception as exc:  # noqa: BLE001 — у постов канала отправителя может не быть
+                log.debug("Не удалось получить отправителя в %s: %s", chat_id, exc)
+                sender = None
+            sender_id = getattr(sender, "id", None) or getattr(event, "sender_id", None)
+            sender_name = ""
+            sender_username = ""
+            if sender is not None:
+                sender_name = (getattr(sender, "first_name", "") or getattr(sender, "title", "") or "").strip()
+                sender_username = (getattr(sender, "username", "") or "").strip()
+            if not sender_name:
+                if chat_type == "Канал":
+                    # у поста канала отправителя нет — пишем сам канал
+                    sender_name = chat_title
+                    sender_username = chat_username
+                    sender_id = chat_id
+                elif outgoing and self.me is not None:
+                    sender_name = self.me.first_name or "владелец"
+                    sender_username = self.me.username or ""
+                    sender_id = self.me.id
+                else:
+                    sender_name = "Аноним"
+
+            if getattr(sender, "bot", False) and not self.cfg.log_bots:
+                return
+
+            text = (event.raw_text or "").strip()
+            attachment: Optional["attachments.Attachment"] = None
+            if self.cfg.log_chat_media and self._has_attachment(event):
+                try:
+                    async with self._media_semaphore:
+                        attachment = await asyncio.wait_for(attachments.extract(event), timeout=45)
+                except asyncio.TimeoutError:
+                    log.warning("Вложение из чата %s не скачано за 45 с", chat_id)
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("Не удалось извлечь вложение из чата %s: %s", chat_id, exc)
+
+            media_url = ""
+            media_type = ""
+            if attachment is not None:
+                media_type = attachment.kind or "media"
+                if attachment.image or attachment.file:
+                    try:
+                        async with self._media_semaphore:
+                            media_url = await self._upload_attachment(attachment)
+                    except Exception as exc:  # noqa: BLE001
+                        log.error("Медиа из чата %s не загружено: %s", chat_id, exc)
+                if not text:
+                    text = attachments.describe(attachment)
+            elif not text:
+                # Пустые служебные события (вход/выход, закрепление) не пишем.
+                return
+
+            direction = "out" if outgoing else "in"
+            try:
+                self.store.log_chat(
+                    chat_id=chat_id, chat_type=chat_type, chat_title=chat_title,
+                    chat_username=chat_username, sender_id=sender_id,
+                    sender_name=sender_name, sender_username=sender_username,
+                    direction=direction, text=text,
+                    media_url=media_url, media_type=media_type,
+                )
+            except Exception as exc:  # noqa: BLE001
+                log.warning("Не удалось записать чат %s в SQLite: %s", chat_id, exc)
+
+            if self.sink and self.sink.enabled:
+                self._sheet_log_async(
+                    chat_type, sender_name, text,
+                    reply="[медиа]" if attachment is not None else "",
+                    username=sender_username, chat_id=chat_id,
+                    chat_title=chat_title, chat_username=chat_username,
+                    sender_id=sender_id, direction=direction,
+                    media_url=media_url, media_type=media_type,
+                )
+                if attachment is not None and attachment.image:
+                    self._sheet_image(attachment, text, sender_name)
+
+            self._db_log(
+                chat_type, sender_name, text, username=sender_username,
+                chat_id=chat_id, media_url=media_url, media_type=media_type,
+                chat_title=chat_title, chat_username=chat_username,
+                sender_id=sender_id, direction=direction,
+            )
+            log.debug("Сохранено %s-сообщение из %s «%s»: %s",
+                      direction, chat_type, chat_title, text[:80])
+        except Exception as exc:  # noqa: BLE001
+            log.exception("Ошибка логирования группы/канала: %s", exc)
+
     @staticmethod
     def _has_attachment(event: events.NewMessage.Event) -> bool:
         message = event.message
@@ -290,7 +448,7 @@ class Assistant:
             return False
         return bool(message.photo or message.document or message.voice or message.audio
                     or message.video or message.video_note or message.sticker or message.gif
-                    or message.contact or message.geo)
+                    or message.contact or message.geo or message.poll)
 
     def _schedule(self, key: int, delay: float, coro_factory) -> None:
         old = self._timers.get(key)
@@ -375,10 +533,18 @@ class Assistant:
         task.add_done_callback(self._tasks.discard)
 
     def _sheet_log_async(self, channel: str, sender: str, text: str, reply: str = "",
-                         username: str = "", chat_id: int | str = "") -> None:
+                         username: str = "", chat_id: int | str = "",
+                         chat_title: str = "", chat_username: str = "",
+                         sender_id: int | str | None = None, direction: str = "",
+                         media_url: str = "", media_type: str = "") -> None:
         if not self.sink or not self.sink.enabled:
             return
-        task = asyncio.create_task(self._sheet_append(self.sink.build_row(channel, sender, text, reply, username, chat_id)))
+        task = asyncio.create_task(self._sheet_append(self.sink.build_row(
+            channel, sender, text, reply, username, chat_id,
+            chat_title=chat_title, chat_username=chat_username,
+            sender_id=sender_id, direction=direction,
+            media_url=media_url, media_type=media_type,
+        )))
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
 
@@ -410,6 +576,8 @@ class Assistant:
 
     async def _process_outgoing(self, event: events.NewMessage.Event) -> None:
         if not event.is_private:
+            # Свои сообщения в группах/каналах: сохраняем, но не вмешиваемся.
+            self._log_chat_event(event, outgoing=True)
             return
         text = (event.raw_text or "").strip()
 
@@ -605,6 +773,7 @@ class Assistant:
             f"Аккаунт: {self.me.first_name} (@{self.me.username})\n"
             f"Модель: {self.cfg.llm_model}\n"
             f"Диалогов: {stats['peers']}, сообщений: {stats['messages']}\n"
+            f"Групп/каналов: {stats.get('chats', 0)}, сообщений: {stats.get('chat_messages', 0)}\n"
             f"Последний ответ: {last}\n"
             f"Лимит: {self.cfg.max_replies_per_hour}/час, молчание после вас: {takeover} мин"
         )
