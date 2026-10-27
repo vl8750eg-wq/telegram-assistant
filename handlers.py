@@ -148,6 +148,8 @@ class Assistant:
     def _db_media(self, attachment: Optional["attachments.Attachment"], caption: str = "",
                   sender: str = "", chat_id: int | str = "") -> None:
         """Сохраняет медиа (картинку или файл) в Supabase Storage и пишет строку с URL."""
+        if not self.cfg.save_media:
+            return
         if attachment is None or not self.db_sink or not self.db_sink.enabled:
             return
         if not attachment.image and not attachment.file:
@@ -158,6 +160,8 @@ class Assistant:
 
     async def _upload_attachment(self, attachment: "attachments.Attachment") -> str:
         """Загружает вложение в Supabase Storage, возвращает публичный URL."""
+        if not self.cfg.save_media:
+            return ""
         if not self.db_sink or not self.db_sink.enabled:
             return ""
         if attachment.image:
@@ -266,10 +270,11 @@ class Assistant:
         text = (event.raw_text or "").strip()
         caption = text
         attachment: Optional[attachments.Attachment] = None
+        media_only = False
         has_media = bool(getattr(event, "photo", None) or getattr(event, "document", None))
         log.debug("Разбор: peer=%s photo=%s doc=%s text=%r", peer_id, bool(getattr(event, "photo", None)),
                   bool(getattr(event, "document", None)), text[:30])
-        if has_media:
+        if has_media and self.cfg.save_media:
             try:
                 text, attachment = await asyncio.wait_for(self._attachment_text(event), timeout=45)
             except asyncio.TimeoutError:
@@ -296,6 +301,13 @@ class Assistant:
                 self._sheet_image(attachment, caption, who)
                 self._db_media(attachment, caption, who, peer_id)
             return
+
+        if not self.cfg.save_media and self._has_attachment(event):
+            # Медиа не скачиваем: сохраняем только подпись или тип вложения.
+            text = text or self._media_marker(event)
+            media_only = True
+            if not text:
+                return
 
         sender = await event.get_sender()
         if not isinstance(sender, User) or sender.bot:
@@ -326,12 +338,8 @@ class Assistant:
                         username=username or "", chat_id=peer_id)
         self._db_log("Личка", sender.first_name or "", text,
                      username=username or "", chat_id=peer_id)
-        if attachment is not None:
-            self._sheet_image(attachment, caption, sender.first_name or "")
-            self._sheet_log_async("Картинка", sender.first_name or "", text,
-                                  reply="[фото вставлено в таблицу]", username=username or "", chat_id=peer_id)
-            self._db_media(attachment, caption, sender.first_name or "", peer_id)
-            return  # на картинку не отвечаем текстом, она уже в таблице
+        if media_only:
+            return  # на медиа, как и раньше, не отвечаем текстом
 
         self._buffers.setdefault(peer_id, []).append(text)
         self._schedule(peer_id, self.cfg.debounce_seconds,
@@ -381,7 +389,7 @@ class Assistant:
 
             text = (event.raw_text or "").strip()
             attachment: Optional["attachments.Attachment"] = None
-            if self.cfg.log_chat_media and self._has_attachment(event):
+            if self.cfg.save_media and self._has_attachment(event):
                 try:
                     async with self._media_semaphore:
                         attachment = await asyncio.wait_for(attachments.extract(event), timeout=45)
@@ -403,8 +411,11 @@ class Assistant:
                 if not text:
                     text = attachments.describe(attachment)
             elif not text:
-                # Пустые служебные события (вход/выход, закрепление) не пишем.
-                return
+                # Медиа не сохраняем: пишем только пометку о типе вложения.
+                text = self._media_marker(event)
+                if not text:
+                    # Пустые служебные события (вход/выход, закрепление) не пишем.
+                    return
 
             direction = "out" if outgoing else "in"
             try:
@@ -440,6 +451,36 @@ class Assistant:
                       direction, chat_type, chat_title, text[:80])
         except Exception as exc:  # noqa: BLE001
             log.exception("Ошибка логирования группы/канала: %s", exc)
+
+    @staticmethod
+    def _media_marker(event: events.NewMessage.Event) -> str:
+        """Текстовая пометка вместо медиа: тип вложения без скачивания."""
+        message = event.message
+        if message is None:
+            return ""
+        if getattr(message, "photo", None):
+            return "[фото]"
+        if getattr(message, "video_note", None):
+            return "[видеокружок]"
+        if getattr(message, "video", None):
+            return "[видео]"
+        if getattr(message, "voice", None):
+            return "[голосовое]"
+        if getattr(message, "audio", None):
+            return "[аудио]"
+        if getattr(message, "sticker", None):
+            return "[стикер]"
+        if getattr(message, "gif", None):
+            return "[GIF]"
+        if getattr(message, "document", None):
+            return "[документ]"
+        if getattr(message, "contact", None):
+            return "[контакт]"
+        if getattr(message, "geo", None):
+            return "[геолокация]"
+        if getattr(message, "poll", None):
+            return "[опрос]"
+        return ""
 
     @staticmethod
     def _has_attachment(event: events.NewMessage.Event) -> bool:
@@ -526,6 +567,8 @@ class Assistant:
     def _sheet_image(self, attachment: Optional["attachments.Attachment"],
                      caption: str = "", sender: str = "") -> None:
         """Вставляет картинку в таблицу отдельной строкой-картинкой."""
+        if not self.cfg.save_media:
+            return
         if attachment is None or not attachment.image or not self.sink or not self.sink.enabled:
             return
         task = asyncio.create_task(self._sheet_image_task(attachment, caption, sender))

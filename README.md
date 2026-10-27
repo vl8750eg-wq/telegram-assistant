@@ -83,7 +83,7 @@ powershell -ExecutionPolicy Bypass -File .\autostart.ps1 -Remove  # выключ
 | `SHEET_LOG_OWNER` | писать ли ваши ручные ответы в личку | `true` |
 | `LOG_GROUPS` | сохранять сообщения из групп и супергрупп | `true` |
 | `LOG_CHANNELS` | сохранять посты из каналов и пабликов | `true` |
-| `LOG_CHAT_MEDIA` | скачивать медиа из групп/каналов в Supabase Storage | `true` |
+| `SAVE_MEDIA` | скачивать и сохранять медиа (фото, файлы) | `false` |
 | `LOG_BOTS` | сохранять сообщения ботов в группах/каналах | `true` |
 
 ## Запись новых сообщений в таблицу
@@ -117,8 +117,10 @@ powershell -ExecutionPolicy Bypass -File .\autostart.ps1 -Remove  # выключ
 останавливает переписку).
 
 Что попадает в таблицу: входящие сообщения из личек, групп и каналов, ответы ассистента,
-ваши ручные ответы и сообщения в «Избранном». Медиа (картинки, файлы) загружаются в
-**Storage** Supabase, а в строке сохраняется их публичный URL.
+ваши ручные ответы и сообщения в «Избранном». По умолчанию сохраняется только текст:
+медиа не скачивается и не загружается, а для сообщения без подписи пишется пометка
+`[фото]`, `[видео]`, `[документ]` и т.п. Чтобы включить загрузку в **Storage** Supabase,
+задайте `SAVE_MEDIA=true`.
 
 Настройка (`.env`):
 
@@ -127,7 +129,7 @@ powershell -ExecutionPolicy Bypass -File .\autostart.ps1 -Remove  # выключ
 | `SUPABASE_URL` | Project URL проекта (`https://<ref>.supabase.co`) | — |
 | `SUPABASE_KEY` | anon (публичный) ключ проекта | — |
 | `SUPABASE_TABLE` | таблица для сообщений | `messages` |
-| `SUPABASE_BUCKET` | ковш Storage для медиа | `messages` |
+| `SUPABASE_BUCKET` | ковш Storage для медиа (при `SAVE_MEDIA=true`) | `messages` |
 | `SUPABASE_WRITE_REPLIES` | писать ли ответы ИИ отдельной строкой | `true` |
 | `SUPABASE_LOG_OWNER` | писать ли ваши ручные ответы | `true` |
 
@@ -157,17 +159,20 @@ message, reply, media_url, media_type, chat_title, chat_username, sender_id, dir
 
 - тип чата (`Группа` / `Канал`), `chat_id`, название и `@username` чата;
 - id, имя и `@username` отправителя (для поста канала — сам канал);
-- текст или подпись к медиа, `media_url` и `media_type`;
+- только текст сообщения или подпись к медиа; для медиа без подписи — пометка
+  `[фото]`, `[видео]`, `[документ]` и т.п.;
 - направление: `in` — входящее, `out` — ваше сообщение.
 
 Важно:
 
 - Ассистент **не отвечает** в группах и каналах — только сохраняет. Личка работает как раньше.
 - Журнал групп/каналов лежит отдельно от истории личек, поэтому не влияет на память LLM.
-- Медиа скачивается только при `LOG_CHAT_MEDIA=true`; в Supabase попадает публичный URL.
+- Медиа по умолчанию не скачивается и не загружается: `SAVE_MEDIA=false`. В личке на
+  сообщение с медиа ассистент, как и раньше, не отвечает, но в историю попадает подпись
+  или пометка о типе вложения.
 - Для очень активных пабликов логирование можно выключить: `LOG_CHANNELS=false`.
-- Если паблик шлёт много фото/файлов, следите за лимитом Supabase Storage (free — 1 ГБ);
-  в этом случае оставьте текст: `LOG_CHAT_MEDIA=false`.
+- Если нужно вернуть сохранение медиа, задайте `SAVE_MEDIA=true`; следите за лимитом
+  Supabase Storage (free — 1 ГБ).
 - `/status` в «Избранном» показывает число чатов и сохранённых сообщений из них.
 
 ## Деплой на Render (free)
@@ -181,8 +186,10 @@ message, reply, media_url, media_type, chat_title, chat_username, sender_id, dir
   идёт через GitHub Actions: workflows `render-deploy`, `render-fix`, `render-logs`.
   Ключ Render API и полный payload настроек лежат в зашифрованных секретах репозитория
   (`RENDER_API_KEY`, `DEPLOY_PAYLOAD`).
-- **Не засыпать:** free-план засыпает через 15 минут без HTTP-запросов. Workflow `keepalive`
-  пингует `/healthz` каждые 5 минут по расписанию GitHub Actions.
+- **Не засыпать:** free-план засыпает через 15 минут без HTTP-запросов. Внешний
+  cron-job.org (задание `8726655`) пингует `/healthz` каждые 5 минут. GitHub Actions
+  `keepalive` оставлен резервом, но его расписание срабатывает нерегулярно, поэтому
+  полагаться на него нельзя.
 - **Важно:** сессия одна — нельзя запускать локальный `start.bat`, пока сервис жив на Render.
 - Обновление env-переменных через API: `PUT /v1/services/{id}/env-vars`, затем новый деплой
   (создание сервиса с envVars в payload их не применяет — проверено).
@@ -195,7 +202,7 @@ message, reply, media_url, media_type, chat_title, chat_username, sender_id, dir
 | `handlers.py` | фильтры, дебаунс, ответы, команды |
 | `llm.py` | клиент LLM, ретраи, чистка markdown, нарезка текста |
 | `sheets.py` | запись сообщений в таблицу SheetDesk |
-| `supabase_sink.py` | реально-временная запись сообщений и медиа в Supabase |
+| `supabase_sink.py` | реально-временная запись сообщений в Supabase |
 | `bootstrap.sql` | SQL для создания таблицы и ковша Supabase |
 | `store.py` | SQLite: история, паузы, настройки |
 | `config.py` | чтение и проверка `.env` |

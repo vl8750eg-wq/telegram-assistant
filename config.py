@@ -111,10 +111,10 @@ class Config:
     # --- логирование групп и каналов ---
     log_groups: bool = True
     log_channels: bool = True
-    log_chat_media: bool = True
     log_bots: bool = True
 
     # --- вложения ---
+    save_media: bool = False
     vision_enabled: bool = True
     vision_model: str = ""
     vision_base_url: str = ""
@@ -190,8 +190,8 @@ def load_config(require_llm: bool = True) -> Config:
         sheet_log_owner=_bool("SHEET_LOG_OWNER", True),
         log_groups=_bool("LOG_GROUPS", True),
         log_channels=_bool("LOG_CHANNELS", True),
-        log_chat_media=_bool("LOG_CHAT_MEDIA", True),
         log_bots=_bool("LOG_BOTS", True),
+        save_media=_bool("SAVE_MEDIA", False),
         vision_enabled=_bool("VISION_ENABLED", True),
         vision_model=_env("VISION_MODEL"),
         vision_base_url=_env("VISION_BASE_URL"),

@@ -142,6 +142,87 @@ def test_chat_log() -> None:
     sink.close()
 
 
+def test_media() -> None:
+    from types import SimpleNamespace
+
+    from config import Config
+    from handlers import Assistant
+
+    print("медиа:")
+    cfg = Config(
+        api_id=1, api_hash="a" * 32, phone="", llm_api_key="k",
+        llm_base_url="x", llm_model="m", owner_name="T", system_prompt="s",
+    )
+    check("медиа по умолчанию не сохраняется", cfg.save_media is False)
+
+    def event(**fields):
+        return SimpleNamespace(message=SimpleNamespace(**fields))
+
+    check("фото — пометка", Assistant._media_marker(event(photo=object())) == "[фото]")
+    check("документ — пометка", Assistant._media_marker(event(document=object())) == "[документ]")
+    check("видео — пометка", Assistant._media_marker(event(video=object())) == "[видео]")
+    check("GIF — пометка", Assistant._media_marker(event(gif=object())) == "[GIF]")
+    check("текст без медиа — пусто", Assistant._media_marker(event()) == "")
+
+    class BoomSink:
+        enabled = True
+
+        def upload_media(self, *args, **kwargs):
+            raise AssertionError("загрузка медиа вызвана")
+
+    a = Assistant(None, cfg, None, None, db_sink=BoomSink())  # type: ignore[arg-type]
+    a._db_media(SimpleNamespace(image=b"x", file=None, kind="photo"), "подпись", "Вася", 1)
+    check("медиа не ставится в очередь", len(a._tasks) == 0)
+
+    class BoomSheet:
+        enabled = True
+
+        def append_image(self, *args, **kwargs):
+            raise AssertionError("вставка медиа вызвана")
+
+    a.sink = BoomSheet()  # type: ignore[assignment]
+    a._sheet_image(SimpleNamespace(image=b"x", image_mime="image/jpeg", width=1, height=1),
+                   "подпись", "Вася")
+    check("картинка не вставляется в таблицу", len(a._tasks) == 0)
+
+    import asyncio
+
+    from store import Store
+
+    class FakeEvent:
+        chat_id = -1001
+        raw_text = ""
+        is_group = True
+        is_channel = False
+        is_private = False
+        sender_id = 42
+        out = False
+        message = SimpleNamespace(
+            photo=object(), document=None, voice=None, audio=None, video=None,
+            video_note=None, sticker=None, gif=None, contact=None, geo=None, poll=None,
+        )
+
+        async def get_chat(self):
+            return SimpleNamespace(title="Тестовая группа", username="testgroup")
+
+        async def get_sender(self):
+            return SimpleNamespace(id=42, first_name="Вася", username="vasya", title="", bot=False)
+
+        async def download_media(self, *args, **kwargs):
+            raise AssertionError("скачивание медиа вызвано")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        st = Store(Path(tmp) / "chat.db")
+        a2 = Assistant(None, cfg, st, None)  # type: ignore[arg-type]
+        asyncio.run(a2._log_chat_event_task(FakeEvent(), outgoing=False))
+        row = st._db.execute("SELECT text, media_url, media_type FROM chat_log").fetchone()
+        check("фото из группы записано", st.stats()["chat_messages"] == 1)
+        check("вместо фото — пометка", row["text"] == "[фото]", row["text"])
+        check("media_url пуст", not row["media_url"])
+        check("media_type пуст", not row["media_type"])
+        st.close()
+
+
 def test_config() -> None:
     import importlib
 
@@ -163,7 +244,7 @@ def test_config() -> None:
 
 
 def main() -> int:
-    for fn in (test_clean_text, test_split, test_store, test_filters, test_chat_log, test_config):
+    for fn in (test_clean_text, test_split, test_store, test_filters, test_chat_log, test_media, test_config):
         fn()
     print()
     if failures:
